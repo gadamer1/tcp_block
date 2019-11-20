@@ -13,6 +13,9 @@
 
 using namespace std;
 
+uint16_t ip_checksum(u_char *buf, uint8_t len);
+uint16_t tcp_checksum(u_char *buf, uint8_t len);
+
 
 struct packet{
 	//ethernet header
@@ -23,7 +26,6 @@ struct packet{
 
 
 	//ip header
-
 	uint8_t header_length:4;
 	uint8_t version:4;
 	uint8_t service_field;
@@ -32,6 +34,9 @@ struct packet{
 	uint16_t flag;
 	uint8_t ttl;
 	uint8_t protocol;
+	uint16_t ip_checksum;
+	uint32_t src_address;
+	uint32_t dest_address;
 
 
 	// tcp_header
@@ -51,24 +56,61 @@ struct packet{
 	uint8_t ack:1;
 	uint8_t urg:1;
 	uint8_t res2:4;
-
+	
+	uint16_t tcp_checksum;
+	uint16_t urgent_pointer;
 };
 
 struct packet* data;
 
 
-int send_rst_packet(pcap_t *fp,int size){
+int send_rst_packet(pcap_t *fp,int size,int len,int type){ // 0 is forward 1 is backward
 
 	struct packet* rst_packet = data;
-
-	rst_packet->rst|=0x1;
-
+	if(type ==0){
+		rst_packet->sequence_number+=len;
+	}else {rst_packet->acknowledgement_number+=len;}
+	rst_packet->rst=1;
+	rst_packet->fin =0;
+	rst_packet->syn=0;
+	rst_packet->ack=0;
+	
+	// calculate IP checksum
+    rst_packet->ip_checksum=htons(ip_checksum((u_char*)(rst_packet+14),rst_packet->header_length*4));
+	
+    // calculate TCP checksum
+    rst_packet->tcp_checksum = tcp_checksum((u_char *)(rst_packet+rst_packet->header_length*4+14), (int)rst_packet->tcp_header_length);
+	
 
 	if(pcap_sendpacket(fp,(const u_char*)rst_packet,size) !=0){
 		fprintf(stderr,"\nError sending the packet: \n");
 		return -1;
 	}
-	printf("\n send rst packet successfully!");
+	printf("\nsend rst packet successfully!\n");
+	return 0;
+}
+
+uint16_t ip_checksum(u_char *buf, uint8_t len){
+    uint32_t sum=0;
+    for(int i=0;i<len;i++){
+        sum+=buf[i];
+    }
+    uint16_t res=(sum>>16)+(sum&0xffff);
+    return ~res;
+}
+
+
+unsigned short tcp_checksum(u_char *buf, uint8_t len)
+{
+    uint32_t sum = 0;
+
+    while(len--)
+        sum += *buf++;
+
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+
+    return (uint16_t)(~sum);
 }
 
 int send_fin_packet(pcap_t *fp,int size){
@@ -82,8 +124,10 @@ int send_fin_packet(pcap_t *fp,int size){
 		fprintf(stderr,"\nError sending the packet: \n");
 		return -1;
 	}
-	printf("\n send rst packet successfully!");
+	printf("\nsend fin packet successfully!\n");
 }
+
+
 
 void usage(){
 	printf("usage: tcp_block <interface> <host>\n");
@@ -131,7 +175,7 @@ int main(int argc,char *argv[]){
 		packet +=14+ip_header_length + (int)data->tcp_header_length*4;
 		
 		int tcp_payload_size = ntohs((int)data->total_length) - (int)ip_header_length- (int)data->tcp_header_length;
-		int size = ntohs((int)data->total_length + (int)ip_header_length + (int)data->tcp_header_length);
+		int size =(int)ip_header_length + (int)data->tcp_header_length;
 		string s((char*)packet,tcp_payload_size);
 		cout <<s<< endl;
 		
@@ -140,11 +184,11 @@ int main(int argc,char *argv[]){
 			if(data->dest_port!=0x0050){
 			/*1. rst packet*/
 				printf("send rst packet\n");
-				if(send_rst_packet(handle,size)==-1) continue;
+				if(send_rst_packet(handle,size,tcp_payload_size,0)==-1) continue;
 			}else{
 				/*backward rst packet*/
 				printf("backward rst packet\n");
-				if(send_rst_packet(handle,size)==-1) continue;
+				if(send_rst_packet(handle,size,tcp_payload_size,1)==-1) continue;
 			}
 			if(data->dest_port != 0x0050){
 			/*2. fin packet*/
